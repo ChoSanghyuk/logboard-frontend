@@ -1,0 +1,9 @@
+dist
+node_modules
+public/mockServiceWorker.js
+src/api/schema.d.ts
+spec
+.claude
+package-lock.json
+CLAUDE.md
+skills-lock.json
