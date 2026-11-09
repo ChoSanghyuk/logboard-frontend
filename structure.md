@@ -73,7 +73,7 @@ src/
  ├─ pages/            one component per route. Servers / LlmEndpoints / Prompts = table + form modal +
  │                    delete confirm (+ test → notification). Servers also: host key column (fingerprint or "Not
                     yet trusted"), "Reset host key" + confirm; a test message matching /Host key .* changed/ shows a
-                    red alert with the reset instead of the toast. SearchPage = server/time/window form →
+                    red alert with the reset instead of the toast. SearchPage = server/time (default today 00:00:00)/window form →
  │                    /errors/:id. ErrorDetailPage = header, candidates, expand buttons (disabled reason in
  │                    a tooltip), LogViewer, confirm/discard; AnalysisPanel from CONFIRMED on; ResolutionInfo/Actions.
  │                    ErrorListPage = filters (status multi, server, requestedTime days in the server's tz, else the

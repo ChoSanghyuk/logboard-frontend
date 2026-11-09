@@ -13,6 +13,7 @@ const timeInput = () => screen.getByRole('textbox', { name: /^Error time/ });
 async function fill(user: User, { server, time, window }: { server: string; time: string; window?: string }) {
   await user.click(await screen.findByRole('combobox', { name: /^Server/ }));
   await user.click(await screen.findByRole('option', { name: server, hidden: true }));
+  await user.clear(timeInput());
   await user.type(timeInput(), time);
   await user.tab();
   if (window) {
@@ -92,13 +93,20 @@ test('loading state and double-submit guard: only one request while a search is 
   expect(bodies).toHaveLength(1);
 });
 
-test('validation: server and time are required', async () => {
+test('error time defaults to today at 00:00:00', async () => {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  renderApp('/search');
+  await screen.findByRole('combobox', { name: /^Server/ });
+  expect(timeInput()).toHaveValue(`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} 00:00:00`);
+});
+
+test('validation: server is required', async () => {
   const user = userEvent.setup();
   renderApp('/search');
   await screen.findByRole('combobox', { name: /^Server/ });
   await user.click(searchButton());
   expect(screen.getByRole('combobox', { name: /^Server/ })).toHaveAccessibleDescription('Select a server');
-  expect(timeInput()).toHaveAccessibleDescription(/Enter the error time/);
 });
 
 test('soft-deleted servers never appear in the server select', async () => {

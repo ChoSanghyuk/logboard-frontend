@@ -22,6 +22,13 @@ type Values = {
 
 const parseWallTime = (s: string) => (isWallTime(s.trim()) ? s.trim() : null);
 
+/** Today at 00:00:00 (browser's date): `YYYY-MM-DD 00:00:00`. */
+const todayWallTime = () => {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} 00:00:00`;
+};
+
 export function SearchPage() {
   const servers = useServers();
   const search = useSearchErrorLog();
@@ -34,7 +41,7 @@ export function SearchPage() {
     servers.data?.find((s) => String(s.id) === String(id));
 
   const form = useForm<Values>({
-    initialValues: { serverId: null, time: null, windowMin: '5' },
+    initialValues: { serverId: null, time: todayWallTime(), windowMin: '5' },
     validate: {
       serverId: (v) => (v ? null : 'Select a server'),
       time: (v, all) => {
