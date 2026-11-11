@@ -70,7 +70,7 @@ test('send → PENDING with elapsed time and timeout → polls every 2s → DONE
   await tick(); // poll 2: DONE
   expect(await panel.findByRole('heading', { name: 'Root cause' })).toBeInTheDocument();
   expect(polls.n).toBe(2);
-  expect(await screen.findByText('Analyzed')).toBeInTheDocument(); // error log refetched → ANALYZED
+  expect(await screen.findByText('분석됨')).toBeInTheDocument(); // error log refetched → ANALYZED
 
   await tick(10_000);
   expect(polls.n).toBe(2); // stopped
@@ -95,7 +95,7 @@ test('FAILED stops polling, shows errorMessage, and Retry resends with the same 
   await tick();
   await tick();
   expect(await panel.findAllByText(/HTTP 401 from https:\/\/api\.openai\.com/)).not.toHaveLength(0);
-  expect(screen.getByText('Confirmed')).toBeInTheDocument(); // FAILED leaves the status unchanged
+  expect(screen.getByText('확인됨')).toBeInTheDocument(); // FAILED leaves the status unchanged
   await tick(10_000);
   expect(polls.n).toBe(2);
 
@@ -166,8 +166,8 @@ test('resumes polling a PENDING latestAnalysis after a reload', async () => {
 
 describe('history-only statuses', () => {
   test.each([
-    ['DEV_REQUIRED', 'Dev required'],
-    ['TERMINATED', 'Terminated'],
+    ['DEV_REQUIRED', '개발자 확인 필요'],
+    ['TERMINATED', '종료됨'],
   ] as const)('%s: no send form; the latest analysis and history are shown', async (status, label) => {
     await confirm();
     const a = await startViaApi();

@@ -78,6 +78,9 @@ export function ErrorDetailPage() {
             {d.id}
           </Title>
           <Text fw={500}>{d.serverName}</Text>
+          <Text ff="monospace" c="dimmed" title={d.instance.logPath}>
+            {d.instance.host}:{d.instance.sshPort}
+          </Text>
           <StatusBadge status={d.status} />
         </Group>
         <Text mt={4}>
@@ -89,14 +92,26 @@ export function ErrorDetailPage() {
         </Text>
       </div>
 
+      {d.fetchFailures.length > 0 && (
+        <Alert color="yellow" title="Some instances could not be read">
+          <Stack gap={4}>
+            {d.fetchFailures.map((f) => (
+              <Text size="sm" key={f.instanceId}>
+                Logs of {f.host}:{f.sshPort} could not be read: {f.message}. The error may be on that node.
+              </Text>
+            ))}
+          </Stack>
+        </Alert>
+      )}
+
       <ResolutionInfo log={d} tz={tz} />
 
       <CandidateSwitcher
         candidates={d.candidates}
-        anchorLine={d.crop.anchorLine}
+        current={{ anchorLine: d.crop.anchorLine, instanceId: d.instance.id }}
         timeZone={tz}
         disabled={!cropped || busy}
-        onSelect={(anchorLine) => crop.mutate({ anchorLine })}
+        onSelect={(candidate) => crop.mutate(candidate)}
       />
 
       <Group gap="sm">

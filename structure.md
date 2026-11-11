@@ -1,17 +1,20 @@
 # Logboard Frontend — Structure
 
 React 19 · Vite 8 · TypeScript 5.9 · Mantine 9 (+ @mantine/form) · react-markdown + rehype-highlight · TanStack Query 5 · React Router 8 · openapi-fetch · MSW 3 · Vitest · Playwright.
-Specs: `spec/logboard-mvp/` (todo.md, design.md §9, api-contract.md).
+Specs: `spec/logboard-mvp/` (todo.md, design.md §9, api-contract.md); `spec/multi-instance-server/` (F9, changes on top);
+`spec/status-ko-labels/` (Korean status labels; API codes stay English).
+Servers have 1–20 **instances** (host, port, log path, username, auth + secret each); name, patterns, tz, charset are per server.
 
 ## Run
 
 ```bash
 npm run dev:mock   # MSW mocks (loads .env.mock → VITE_USE_MOCKS=true), no backend needed
 npm run dev        # real API: Vite proxies /api → http://localhost:8080
-npm run gen:api    # regenerate src/api/schema.d.ts from the running backend's /v3/api-docs (scripts/gen-api.mjs)
+npm run gen:api    # regenerate src/api/schema.d.ts from the running backend's /v3/api-docs (scripts/gen-api.mjs;
+                   # another URL: npm run gen:api -- http://host:port/v3/api-docs)
 npm run build | npm test | npm run lint | npm run format
 npm run e2e        # Playwright (e2e/main-flow.spec.ts) against http://localhost:8088 (E2E_BASE_URL), needs the
-                   # compose stack: cd .. && docker-compose --profile demo up -d --build
+                   # compose stack (incl. demo-sshd-2): cd .. && docker-compose --profile demo up -d --build
 ```
 
 Production: `Dockerfile` (node build → nginx:alpine, classic builder, no BuildKit) + `nginx.conf` (port 80, SPA fallback,
@@ -37,7 +40,8 @@ src/
  │   ├─ schema.d.ts   GENERATED from /v3/api-docs (do not edit, no hand patches; paths include /api)
  │   ├─ client.ts     `api` (openapi-fetch), `unwrap()`, `ApiRequestError {status, code, details}`
  │   ├─ servers.ts    query/mutation hooks: useServers, useLogPatterns, useSaveServer, useDeleteServer, useTestServer, useResetHostKey
- │   │                (test + reset refetch the list: a first successful test pins the host key)
+ │   │                (test → one result per instance; reset is per instance {id, instanceId}; both refetch the list:
+ │   │                a first successful test pins each instance's host key)
  │   ├─ llmEndpoints.ts / prompts.ts  same pattern (list, save, delete; useTestLlmEndpoint)
  │   ├─ analyses.ts   useAnalysis (polls every 2s while PENDING), useAnalysisHistory, useStartAnalysis
  │   ├─ errorLogs.ts  useSearchErrorLog (NO_EXCEPTION_FOUND / FETCH_FAILED inline); useErrorLog(id); useErrorLogs(query)
@@ -46,9 +50,11 @@ src/
  │   │                leave 400 VALIDATION_FAILED to the modal form
  │   └─ queryClient.ts createQueryClient(): global error → Mantine notification
  ├─ mocks/
- │   ├─ fixtures.ts   seed data (servers, patterns, LLM, prompts, error logs + raw log: 20261108-001 CROPPED (most
- │   │                tests), 20261107-002 DEV_REQUIRED, 20261107-001 TERMINATED by AGENT (eu-gateway),
- │   │                20261106-002 TERMINATED by USER, 20261106-001 DISCARDED)
+ │   ├─ fixtures.ts   seed data. Servers (instance id = {serverId}{position}): 1 order-api (11, 12), 2 billing-batch (21),
+ │   │                3 eu-gateway (31, 32), 4 cart-api (41, 42). Error logs carry a raw copy per fetched instance
+ │   │                (`fetched()`: last instance has NPE@201 + SQL@300, others SQL@300): 20261108-001 CROPPED
+ │   │                (most tests; anchor 201 on 12, candidates 11@300, 12@201, 12@300), 20261107-002 DEV_REQUIRED,
+ │   │                20261107-001 TERMINATED by AGENT (eu-gateway), 20261106-002 TERMINATED by USER, 20261106-001 DISCARDED
  │   ├─ handlers.ts   all contract endpoints over an in-memory db; resetDb()
  │   └─ browser.ts / server.ts  MSW worker (dev) / node server (tests)
  ├─ test/             setup.ts (jsdom shims, MSW, cleanup), render.tsx (renderWithProviders, renderApp → {…, router}),
@@ -57,7 +63,8 @@ src/
  │   ├─ AppLayout.tsx   AppShell: header + nav (Search · Errors · Servers · Settings ▸ LLM, Prompts), <Outlet/>
  │   ├─ AnalysisPanel.tsx  endpoint/prompt (defaults preselected) → send; current analysis (resumes a PENDING
  │   │                  latestAnalysis; DONE/FAILED → refetch error log); retry; collapsed history
- │   ├─ CandidateSwitcher.tsx  radio list of candidates (time in server tz, class, message); hidden if ≤ 1
+ │   ├─ CandidateSwitcher.tsx  radio list of candidates over all instances (time in server tz, class, message, host);
+ │   │                  keyed by (instanceId, anchorLine), sends both; hidden if ≤ 1
  │   ├─ ConfirmDeleteModal.tsx  delete confirm; 409 IN_USE shown inline, other errors notified
  │   ├─ MarkdownReply.tsx  reply as markdown + highlight.js + copy; raw HTML never rendered
  │   ├─ LlmEndpointForm.tsx / PromptForm.tsx  settings forms (apiKey hint + "Remove stored key" → clearApiKey;
@@ -67,27 +74,36 @@ src/
  │   ├─ Resolution.tsx  ResolutionActions: Terminate (CONFIRMED/ANALYZED/DEV_REQUIRED) / Developer needed (ANALYZED)
  │   │                  → modal with a required text (400 field → modal, 409 → close + refetch);
  │   │                  ResolutionInfo: dev-required note; resolution, note, resolvedBy (AGENT = "code agent (MCP)"), resolvedAt
- │   ├─ ServerForm.tsx  add/edit form: client rules (secret, pattern, regex groups) + server field-error mapping
- │   └─ StatusBadge.tsx ErrorStatus → label + color (CROPPED yellow, CONFIRMED blue, ANALYZED violet,
- │                      DEV_REQUIRED orange, TERMINATED green, DISCARDED gray)
+ │   ├─ ServerForm.tsx  add/edit form: shared fields + "Instances" (Fieldset "Instance #N", add/remove, 1–20, `id`
+ │   │                  kept on edit; secret required if new or authType changed, "Secret stored" hint per row),
+ │   │                  client rules (pattern, regex groups) + server field errors (`instances[N].x` → row N;
+ │   │                  `instances[N].id` → row N host)
+ │   └─ StatusBadge.tsx exported STATUS_META (single source, lifecycle order): ErrorStatus → Korean label, color,
+ │                      description (CROPPED 추출됨 yellow, CONFIRMED 확인됨 blue, ANALYZED 분석됨 violet, DEV_REQUIRED
+ │                      개발자 확인 필요 orange, TERMINATED 종료됨 green, DISCARDED 폐기됨 gray); badge + description tooltip
  ├─ pages/            one component per route. Servers / LlmEndpoints / Prompts = table + form modal +
- │                    delete confirm (+ test → notification). Servers also: host key column (fingerprint or "Not
-                    yet trusted"), "Reset host key" + confirm; a test message matching /Host key .* changed/ shows a
-                    red alert with the reset instead of the toast. SearchPage = server/time (default today 00:00:00)/window form →
- │                    /errors/:id. ErrorDetailPage = header, candidates, expand buttons (disabled reason in
+ │                    delete confirm (+ test → notification). Servers also: host "first host:port +N" (tooltip lists
+                    all), user/log path of the first instance, host key per instance (fingerprint + "Reset" or "Not yet
+                    trusted") + confirm; test toast = one ✓/✗ line per instance; a result matching /Host key .* changed/
+                    → red alert with that instance's reset (no toast if every result is one). SearchPage =
+                    server/time (default today 00:00:00)/window form → /errors/:id; 404 lists searched instances +
+                    failures, 502 every failure. ErrorDetailPage = header (+ instance host:port), yellow alert per
+ │                    fetchFailure, candidates, expand buttons (disabled reason in
  │                    a tooltip), LogViewer, confirm/discard; AnalysisPanel from CONFIRMED on; ResolutionInfo/Actions.
- │                    ErrorListPage = filters (status multi, server, requestedTime days in the server's tz, else the
- │                    browser's) + table + paging (20); state in the URL: ?status=A&status=B&server=&from=&to=&page=
+ │                    ErrorListPage = filters (status multi with Korean labels + ⓘ "상태 안내" popover, server,
+ │                    requestedTime days in the server's tz, else the browser's) + table (server + instance host)
+ │                    + paging (20); state in the URL: ?status=A&status=B&server=&from=&to=&page=
  │                    (1-based); no `status` = all but TERMINATED/DISCARDED (sent explicitly), `status=` = any;
                     "Reset filters" clears the query
  ├─ lib/              crop.ts (expandBlockers: why expand is disabled; cropText)
- │                    formErrors.ts (applyApiErrors: API errors → form fields)
+ │                    formErrors.ts (applyApiErrors: API errors → form fields, `a[1].b` → `a.1.b`)
  │                    format.ts (formatInTz, formatBytes)
  │                    timezone.ts (zonedWallTimeToIso: wall time in server tz → ISO with DST-correct
  │                    offset, null in a DST gap; offsetLabel)
  │                    logPattern.ts (missingGroups: ts/level, rotatedPatternError: %d once; form + mock)
-e2e/main-flow.spec.ts  add server → test (TOFU) → search → expand → confirm → analyze → dev-required → terminate →
-                       /errors filters; LLM endpoint + prompt created via API; fails on any console error
+e2e/main-flow.spec.ts  add server with 2 instances (demo-sshd, demo-sshd-2) → test (TOFU per instance) → search
+                       (found on instance #2) → expand → confirm → analyze → dev-required → terminate → /errors filters;
+                       LLM endpoint + prompt created via API; fails on any console error
 public/mockServiceWorker.js   generated by `msw init`
 ```
 
@@ -103,17 +119,23 @@ public/mockServiceWorker.js   generated by `msw init`
   `meta: { silentError: true }` to show it inline instead (e.g. NO_EXCEPTION_FOUND). 4xx are not retried.
 - Form errors: save mutations use `silentError`; `onError` calls `applyApiErrors(error, form)` →
   `VALIDATION_FAILED` fields on inputs (unknown → returned for an inline alert), `DUPLICATE_NAME` on `details.field`,
-  anything else → notification. Write-only secrets: blank = omitted (kept); hint "Secret stored" when `hasSecret`.
+  anything else → notification. Write-only secrets: blank = omitted (kept); hint "Secret stored" when `hasSecret`
+  (per instance for servers).
 - Lists refetch after save (`isDefault` on one clears the others server-side).
 - Times: API returns UTC; display with `formatInTz(iso, server.timezone)`. User input is a wall time
   (`YYYY-MM-DD HH:mm:ss`) in the server's timezone; send `zonedWallTimeToIso(wall, server.timezone)`.
-- Mock rules: search by server 1 → `201` (after 1.5s), server 2 → `404 NO_EXCEPTION_FOUND`, server 3
-  (`eu-gateway`, Europe/Berlin) → `502 FETCH_FAILED`. Like the backend: `errorTime` without offset →
+- Mock rules: search by server 1 → `201` (after 1.5s; candidates on both instances, anchor on 12), server 2 →
+  `404 NO_EXCEPTION_FOUND` (`searchedInstances`, `failures`), server 3 (`eu-gateway`, Europe/Berlin) → `502 FETCH_FAILED`
+  (`details.failures` for 31 + 32), server 4 → `201` with `fetchFailures` (42 times out). Like the backend: `errorTime` without offset →
   `400 BAD_REQUEST`, `windowMin` ∉ 1–1440 / list `size` ∉ 1–100 → `400 VALIDATION_FAILED`, unknown or
   soft-deleted server → `404 NOT_FOUND`. PATCH crop: empty body / non-candidate anchor → 400; crop has
   `expandStep` 50, `maxLines` 2000 (clamped). Illegal transition → `409 INVALID_STATUS {status, action}`.
-  Server 2 connection test fails. Server 3 test → "Host key … changed" until reset; a successful test pins
-  `SHA256:mockPinned{id}` when none is stored; changing host/port forgets the fingerprint.
+  Server validation uses `instances[N].field` keys (blank, port, duplicate host/port/path, unknown id, secret).
+  Unreachable = instance 42 or a host containing `down` (search: in `failures`, not `searchedInstances`; test: timeout).
+  502 message = failures as `host:port: message` joined by `; `. Candidates by instance position, then line.
+  Test: server 2 → auth fail, 31 → "Host key … changed" until reset; an ok instance pins
+  `SHA256:mockPinned{instanceId}` when none is stored; changing an instance's host/port forgets its fingerprint.
+  PATCH crop `{anchorLine, instanceId}` must match a candidate (no instanceId = current instance) and moves the crop.
   Deleting a server referenced by error logs soft-deletes it (hidden from list, name kept on logs).
   LLM endpoint 1 / prompt 1 are referenced by analyses → DELETE `409 IN_USE`. LLM endpoint 2 test → `ok:false`.
   Names are unique per resource → `409 DUPLICATE_NAME`.

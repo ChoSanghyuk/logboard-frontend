@@ -4,6 +4,8 @@ import type { components } from './schema';
 
 export type ServerDto = components['schemas']['ServerDto'];
 export type ServerUpsert = components['schemas']['ServerUpsert'];
+export type InstanceDto = components['schemas']['InstanceDto'];
+export type InstanceUpsert = components['schemas']['InstanceUpsert'];
 
 const SERVERS = ['servers'];
 
@@ -38,7 +40,10 @@ export function useDeleteServer() {
   });
 }
 
-/** Always 200 for a known id: `ok:false` is a result, not an HTTP error. A first successful test pins the host key. */
+/**
+ * Tests every instance. Always 200 for a known id: `ok:false` (any instance failed) is a result, not an HTTP error.
+ * A first successful test of an instance pins its host key.
+ */
 export function useTestServer() {
   const qc = useQueryClient();
   return useMutation({
@@ -47,12 +52,16 @@ export function useTestServer() {
   });
 }
 
-/** Forget the pinned host key; the next test or search trusts the key presented then. */
+/** Forget an instance's pinned host key; the next test or search trusts the key presented then. */
 export function useResetHostKey() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: number) =>
-      unwrap(api.POST('/api/servers/{id}/reset-host-key', { params: { path: { id } } })),
+    mutationFn: ({ id, instanceId }: { id: number; instanceId: number }) =>
+      unwrap(
+        api.POST('/api/servers/{id}/instances/{instanceId}/reset-host-key', {
+          params: { path: { id, instanceId } },
+        }),
+      ),
     onSuccess: () => qc.invalidateQueries({ queryKey: SERVERS }),
   });
 }

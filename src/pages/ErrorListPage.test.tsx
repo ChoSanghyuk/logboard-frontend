@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { expect, test } from 'vitest';
 import type { components } from '../api/schema';
+import { STATUS_META } from '../components/StatusBadge';
 import { server } from '../mocks/server';
 import { renderApp } from '../test/render';
 
@@ -32,10 +33,10 @@ test('default filter: all but TERMINATED / DISCARDED (sent explicitly), page 0, 
   const cells = within(rows()[0]).getAllByRole('cell');
   expect(cells.map((c) => c.textContent)).toEqual([
     '20261108-001',
-    'order-api',
+    'order-api 10.0.1.22', // + the instance host
     '2026-11-08 14:32:00', // 05:32Z in Asia/Seoul
     'java.lang.NullPointerException: Cannot invoke "Customer.getId()" because "customer" is null',
-    'Cropped',
+    '추출됨',
     '2026-11-08 14:35:10',
   ]);
   expect(screen.getByText('2 error logs · newest first')).toBeInTheDocument();
@@ -80,6 +81,7 @@ test('paging: size 20, the page is in the URL, Back from the detail restores it,
     serverId: 1,
     serverName: 'order-api',
     serverTimezone: 'Asia/Seoul',
+    instance: { id: 12, host: '10.0.1.22', sshPort: 22, logPath: '/var/log/order-api/application.log' },
     requestedTime: '2026-11-08T05:32:00Z',
     exceptionClass: null,
     exceptionMessage: `error ${45 - i}`,
@@ -132,4 +134,17 @@ test('"Reset filters" restores the default open statuses and clears server, date
   expect(q.getAll('status')).toEqual(['CROPPED', 'CONFIRMED', 'ANALYZED', 'DEV_REQUIRED']);
   expect([q.get('serverId'), q.get('from'), q.get('to'), q.get('page')]).toEqual([null, null, null, '0']);
   expect(screen.getByRole('button', { name: 'Reset filters' })).toBeDisabled();
+});
+
+test('"상태 안내" lists all six statuses in lifecycle order with their descriptions', async () => {
+  const user = userEvent.setup();
+  renderApp('/errors');
+  await screen.findByRole('link', { name: '20261108-001' });
+  await user.click(screen.getByRole('button', { name: '상태 안내' }));
+  const dialog = await screen.findByRole('dialog');
+  expect(within(dialog).getByText('상태 안내')).toBeInTheDocument();
+  const badges = Array.from(dialog.querySelectorAll('.mantine-Badge-root'), (b) => b.textContent);
+  expect(badges).toEqual(['추출됨', '확인됨', '분석됨', '개발자 확인 필요', '종료됨', '폐기됨']);
+  for (const { description } of Object.values(STATUS_META))
+    expect(within(dialog).getByText(description)).toBeInTheDocument();
 });

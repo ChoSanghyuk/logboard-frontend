@@ -81,7 +81,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/servers/{id}/reset-host-key": {
+    "/api/servers/{id}/instances/{instanceId}/reset-host-key": {
         parameters: {
             query?: never;
             header?: never;
@@ -325,14 +325,19 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        ServerUpsert: {
-            name: string;
+        InstanceUpsert: {
+            /**
+             * Format: int64
+             * @description Existing instance of this server to update; absent = new instance
+             */
+            id?: number | null;
             host: string;
             /**
              * Format: int32
              * @default 22
              */
             sshPort?: number | null;
+            logPath: string;
             username: string;
             /** @enum {string} */
             authType: "PASSWORD" | "KEY";
@@ -340,8 +345,11 @@ export interface components {
             password?: string | null;
             /** @description Write-only. OpenSSH/PEM private key (no passphrase). Used when authType=KEY */
             privateKey?: string | null;
-            logPath: string;
-            /** @description Rotated file name pattern, e.g. app.%d{yyyy-MM-dd}.%i.log.gz. One %d{format} required, %i optional, .gz optional. Without '/' the files are in logPath's directory */
+        };
+        ServerUpsert: {
+            name: string;
+            instances: components["schemas"]["InstanceUpsert"][];
+            /** @description Rotated file name pattern, e.g. app.%d{yyyy-MM-dd}.%i.log.gz. One %d{format} required, %i optional, .gz optional. Without '/' the files are in the directory of each instance's logPath */
             rotatedPattern?: string | null;
             /** @description Preset key from GET /log-patterns */
             logPatternKey?: string | null;
@@ -352,22 +360,16 @@ export interface components {
             /** @default UTF-8 */
             charset?: string | null;
         };
-        ServerDto: {
+        InstanceDto: {
             /** Format: int64 */
             id: number;
-            name: string;
             host: string;
             /** Format: int32 */
             sshPort: number;
+            logPath: string;
             username: string;
             /** @enum {string} */
             authType: "PASSWORD" | "KEY";
-            logPath: string;
-            rotatedPattern: string | null;
-            logPatternKey: string | null;
-            customLogRegex: string | null;
-            timezone: string;
-            charset: string;
             hasSecret: boolean;
             /**
              * @description Trusted SSH host key (SHA256:…), pinned on the first successful login; null = not yet
@@ -379,9 +381,25 @@ export interface components {
             /** Format: date-time */
             updatedAt: string;
         };
+        ServerDto: {
+            /** Format: int64 */
+            id: number;
+            name: string;
+            /** @description Active instances, by position */
+            instances: components["schemas"]["InstanceDto"][];
+            rotatedPattern: string | null;
+            logPatternKey: string | null;
+            customLogRegex: string | null;
+            timezone: string;
+            charset: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
         PromptTemplateUpsert: {
             name: string;
-            /** @description Must contain {{errorLog}}. Optional: {{serverName}}, {{errorTime}}, {{exceptionClass}} */
+            /** @description Must contain {{errorLog}}. Optional: {{serverName}}, {{host}}, {{errorTime}}, {{exceptionClass}} */
             content: string;
             /** @default false */
             isDefault?: boolean | null;
@@ -446,6 +464,16 @@ export interface components {
         };
         ConnectionTestResult: {
             ok: boolean;
+            results: components["schemas"]["InstanceTestResult"][];
+        };
+        InstanceTestResult: {
+            /** Format: int64 */
+            instanceId: number;
+            host: string;
+            /** Format: int32 */
+            sshPort: number;
+            logPath: string;
+            ok: boolean;
             message: string;
             logFileFound: boolean;
             /** Format: int64 */
@@ -485,7 +513,14 @@ export interface components {
             finishedAt: string | null;
         };
         CandidateDto: {
-            /** Format: int32 */
+            /** Format: int64 */
+            instanceId: number;
+            /** @description Host of the candidate's instance */
+            host: string;
+            /**
+             * Format: int32
+             * @description Line in the raw copy of that instance
+             */
             anchorLine: number;
             /** Format: date-time */
             time: string;
@@ -525,6 +560,8 @@ export interface components {
              * @example Asia/Seoul
              */
             serverTimezone: string;
+            /** @description Instance the crop comes from */
+            instance: components["schemas"]["InstanceRef"];
             /** Format: date-time */
             requestedTime: string;
             /** @description Top-level exception class; null for an ERROR entry without a trace */
@@ -546,10 +583,30 @@ export interface components {
              */
             resolvedAt: string | null;
             crop: components["schemas"]["CropDto"];
-            /** @description All candidates in the window, in line order */
+            /** @description All candidates in the window over all fetched instances: by instance position, then line */
             candidates: components["schemas"]["CandidateDto"][];
+            /** @description Instances that could not be read during the search; [] if none */
+            fetchFailures: components["schemas"]["FetchFailure"][];
             /** @description Newest analysis (any status); `null` if none (always present) */
             latestAnalysis: components["schemas"]["AnalysisDto"] | null;
+        };
+        FetchFailure: {
+            /** Format: int64 */
+            instanceId: number;
+            host: string;
+            /** Format: int32 */
+            sshPort: number;
+            logPath: string;
+            /** @example Timed out after 10s (connecting to app@10.0.1.13:22) */
+            message: string;
+        };
+        InstanceRef: {
+            /** Format: int64 */
+            id: number;
+            host: string;
+            /** Format: int32 */
+            sshPort: number;
+            logPath: string;
         };
         DevRequiredRequest: {
             /** @description What the developer / code agent should look at */
@@ -591,6 +648,11 @@ export interface components {
              * @description anchorLine of one of the candidates
              */
             anchorLine?: number | null;
+            /**
+             * Format: int64
+             * @description instanceId of that candidate (only with anchorLine); absent = the current instance
+             */
+            instanceId?: number | null;
         };
         LogPatternDto: {
             /** @example SPRING_BOOT_3 */
@@ -618,6 +680,8 @@ export interface components {
              * @example Asia/Seoul
              */
             serverTimezone: string;
+            /** @description Instance the crop comes from */
+            instance: components["schemas"]["InstanceRef"];
             /** Format: date-time */
             requestedTime: string;
             /** @description Top-level exception class; null for an ERROR entry without a trace */
@@ -883,6 +947,7 @@ export interface operations {
             header?: never;
             path: {
                 id: number;
+                instanceId: number;
             };
             cookie?: never;
         };
@@ -1247,7 +1312,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Exception found and cropped (status CROPPED) */
+            /** @description Exception found and cropped (status CROPPED). Instances that could not be read are listed in fetchFailures */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -1256,7 +1321,7 @@ export interface operations {
                     "*/*": components["schemas"]["ErrorLogDetail"];
                 };
             };
-            /** @description NO_EXCEPTION_FOUND (details: errorTime, windowMin, from, to) or NOT_FOUND (server) */
+            /** @description NO_EXCEPTION_FOUND (details: errorTime, windowMin, from, to, searchedInstances: InstanceRef[], failures: FetchFailure[]) or NOT_FOUND (server) */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1265,7 +1330,7 @@ export interface operations {
                     "*/*": components["schemas"]["ApiError"];
                 };
             };
-            /** @description FETCH_FAILED */
+            /** @description FETCH_FAILED: every instance failed (details.failures: FetchFailure[]) */
             502: {
                 headers: {
                     [name: string]: unknown;
@@ -1298,6 +1363,15 @@ export interface operations {
                 };
                 content: {
                     "*/*": components["schemas"]["ErrorLogDetail"];
+                };
+            };
+            /** @description VALIDATION_FAILED (fields.anchorLine: not a candidate; fields.instanceId: without anchorLine) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "*/*": components["schemas"]["ApiError"];
                 };
             };
             /** @description INVALID_STATUS (not CROPPED) */

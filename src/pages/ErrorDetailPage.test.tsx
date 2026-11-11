@@ -9,7 +9,9 @@ import { captureBodies } from '../test/captureBodies';
 import { renderApp } from '../test/render';
 
 type Detail = components['schemas']['ErrorLogDetail'];
-const ID = '20261108-001'; // fixture: CROPPED, crop 181–220 of 400, anchor 201, candidates 201 / 300, order-api (Seoul)
+// Fixture: CROPPED, order-api (Seoul), crop 181–220 of 400, anchor 201 on instance 12 (10.0.1.22).
+// Candidates: 10.0.1.21 line 300 (SQL), 10.0.1.22 line 201 (NPE), 10.0.1.22 line 300 (SQL).
+const ID = '20261108-001';
 
 const before = () => screen.getByRole('button', { name: /\+50 before/ });
 const after = () => screen.getByRole('button', { name: /\+50 after/ });
@@ -23,11 +25,13 @@ async function serveDetail(change: (d: Detail) => Partial<Detail>) {
   server.use(http.get('*/api/error-logs/:id', () => HttpResponse.json(detail)));
 }
 
-test('header: id, server, status, exception, requested time in the server timezone', async () => {
+test('header: id, server, instance, status, exception, requested time in the server timezone', async () => {
   renderApp(`/errors/${ID}`);
   await loaded();
   expect(screen.getByText('order-api')).toBeInTheDocument();
-  expect(screen.getByText('Cropped')).toBeInTheDocument();
+  expect(screen.getByText('10.0.1.22:22')).toHaveAttribute('title', '/var/log/order-api/application.log');
+  expect(screen.queryByText(/could not be read/)).not.toBeInTheDocument(); // fetchFailures: []
+  expect(screen.getByText('추출됨')).toBeInTheDocument();
   expect(
     screen.getByText(
       (_, el) =>
@@ -95,20 +99,52 @@ test('maxLines reached disables both and says why', async () => {
   expect(screen.getByText('The crop is at the 40-line limit.')).toBeInTheDocument();
 });
 
-test('switching candidates sends anchorLine and re-crops around it', async () => {
+test('fetchFailures: a yellow warning per instance that could not be read', async () => {
+  await serveDetail(() => ({
+    fetchFailures: [
+      {
+        instanceId: 13,
+        host: '10.0.1.23',
+        sshPort: 22,
+        logPath: '/var/log/order-api/application.log',
+        message: 'Connection timed out',
+      },
+    ],
+  }));
+  renderApp(`/errors/${ID}`);
+  await loaded();
+  const alert = within(screen.getByRole('alert', { name: 'Some instances could not be read' }));
+  expect(
+    alert.getByText(
+      'Logs of 10.0.1.23:22 could not be read: Connection timed out. The error may be on that node.',
+    ),
+  ).toBeInTheDocument();
+});
+
+test('candidates across instances: show the host; switching sends { anchorLine, instanceId } and moves the crop', async () => {
   const bodies = captureBodies(/\/crop$/);
   const user = userEvent.setup();
   renderApp(`/errors/${ID}`);
   await loaded();
+  expect(screen.getAllByRole('radio')).toHaveLength(3);
   const current = screen.getByRole('radio', { name: /NullPointerException/ });
   expect(current).toBeChecked();
-  expect(screen.getByText('line 201 · current')).toBeInTheDocument();
-  const sql = screen.getByRole('radio', { name: /2026-11-08 14:33:10 · java\.sql\.SQLException/ });
-  await user.click(sql);
+  expect(screen.getByText('10.0.1.22 · line 201 · current')).toBeInTheDocument();
+  expect(screen.getByText('10.0.1.21 · line 300')).toBeInTheDocument();
+
+  // Same line 300 on both instances: picking the one on 10.0.1.21 moves the crop to that instance.
+  const other = screen.getByRole('radio', { description: '10.0.1.21 · line 300' });
+  await user.click(other);
   await waitFor(() => expect(row(300)).toHaveAttribute('data-kind', 'ANCHOR'));
-  expect(bodies).toEqual([{ anchorLine: 300 }]);
-  expect(sql).toBeChecked();
+  expect(bodies).toEqual([{ anchorLine: 300, instanceId: 11 }]);
+  expect(other).toBeChecked();
+  expect(screen.getByRole('radio', { description: '10.0.1.22 · line 300' })).not.toBeChecked();
+  expect(screen.getByText('10.0.1.21:22')).toBeInTheDocument(); // header follows the instance
   expect(row(201)).toBeNull();
+
+  await user.click(screen.getByRole('radio', { description: '10.0.1.22 · line 300' }));
+  await waitFor(() => expect(screen.getByText('10.0.1.22:22')).toBeInTheDocument());
+  expect(bodies[1]).toEqual({ anchorLine: 300, instanceId: 12 });
 });
 
 test('confirm: CONFIRMED locks the crop, hides confirm/discard and shows the analysis placeholder', async () => {
@@ -117,10 +153,10 @@ test('confirm: CONFIRMED locks the crop, hides confirm/discard and shows the ana
   await loaded();
   expect(screen.queryByLabelText('Analysis')).not.toBeInTheDocument();
   await user.click(screen.getByRole('button', { name: /Confirm crop/ }));
-  expect(await screen.findByText('Confirmed')).toBeInTheDocument();
+  expect(await screen.findByText('확인됨')).toBeInTheDocument();
   expect(before()).toBeDisabled();
   expect(after()).toBeDisabled();
-  expect(screen.getByRole('radio', { name: /SQLException/ })).toBeDisabled();
+  for (const radio of screen.getAllByRole('radio', { name: /SQLException/ })) expect(radio).toBeDisabled();
   expect(screen.queryByRole('button', { name: /Confirm crop/ })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Discard' })).not.toBeInTheDocument();
   expect(screen.getByLabelText('Analysis')).toBeInTheDocument();
@@ -139,7 +175,7 @@ test('discard asks for confirmation, then moves to DISCARDED', async () => {
 
   await user.click(screen.getByRole('button', { name: 'Discard' }));
   await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Discard' }));
-  expect(await screen.findByText('Discarded')).toBeInTheDocument();
+  expect(await screen.findByText('폐기됨')).toBeInTheDocument();
   await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   expect(bodies).toHaveLength(1);
   expect(screen.queryByLabelText('Analysis')).not.toBeInTheDocument();
@@ -154,7 +190,7 @@ test('409 INVALID_STATUS (changed elsewhere): shows a message and refetches the 
   await user.click(before());
   expect(await screen.findByText('Status changed')).toBeInTheDocument();
   expect(screen.getByText(/RECROP is not allowed in status CONFIRMED/)).toBeInTheDocument();
-  expect(await screen.findByText('Confirmed')).toBeInTheDocument();
+  expect(await screen.findByText('확인됨')).toBeInTheDocument();
   expect(before()).toBeDisabled();
 });
 

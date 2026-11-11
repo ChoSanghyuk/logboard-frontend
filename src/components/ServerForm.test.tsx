@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, test, vi } from 'vitest';
@@ -10,6 +10,9 @@ import { ServerForm } from './ServerForm';
 
 const textbox = (name: RegExp) => screen.getByRole('textbox', { name });
 const passwordInput = () => screen.getByLabelText(/^Password/, { selector: 'input[type=password]' });
+/** Fieldset of instance #n (1-based). */
+const row = (n: number) => within(screen.getByRole('group', { name: `Instance #${n}` }));
+const rowPassword = (n: number) => row(n).getByLabelText(/^Password/, { selector: 'input[type=password]' });
 const submit = (user: ReturnType<typeof userEvent.setup>, name = /Add server|Save/) =>
   user.click(screen.getByRole('button', { name }));
 
@@ -125,33 +128,186 @@ describe('rotated pattern', () => {
   });
 });
 
-describe('secret rules on edit', () => {
-  const keyServer = servers[0]; // authType KEY, hasSecret
+describe('instances', () => {
+  const order = servers[0]; // #1 10.0.1.21 KEY, #2 10.0.1.22 PASSWORD, both with a stored secret
 
-  test('same authType: shows "secret stored" and a blank secret is omitted (kept)', async () => {
+  async function fillRow(user: ReturnType<typeof userEvent.setup>, n: number, host: string) {
+    await user.type(row(n).getByRole('textbox', { name: /^Host/ }), host);
+    await user.type(row(n).getByRole('textbox', { name: /^Username/ }), 'app');
+    await user.type(row(n).getByRole('textbox', { name: /^Log path/ }), '/app/logs/application.log');
+  }
+
+  test('add / remove instances: at least 1, at most 20; port defaults to 22; sent in order', async () => {
     const bodies = captureServerBodies();
-    const { user, onSaved } = renderForm(keyServer);
-    expect(textbox(/^Private key/)).toHaveAccessibleDescription(/Secret stored/);
+    const { user, onSaved } = renderForm();
+    const add = screen.getByRole('button', { name: '+ Add instance' });
+    expect(row(1).getByRole('button', { name: 'Remove instance #1' })).toBeDisabled(); // min 1
+
+    await user.click(add);
+    expect(row(2).getByRole('textbox', { name: /^SSH port/ })).toHaveValue('22');
+    expect(row(1).getByRole('button', { name: 'Remove instance #1' })).toBeEnabled();
+    await user.click(add);
+    await user.click(row(2).getByRole('button', { name: 'Remove instance #2' }));
+    expect(screen.getAllByRole('group', { name: /^Instance #/ })).toHaveLength(2);
+
+    await user.type(textbox(/^Name/), 'pair-api');
+    await fillRow(user, 1, '10.0.1.11');
+    await user.type(rowPassword(1), 'pw1');
+    await fillRow(user, 2, '10.0.1.12');
+    await user.click(row(2).getByRole('radio', { name: 'Private key' }));
+    await user.type(row(2).getByRole('textbox', { name: /^Private key/ }), 'KEY2');
+    await pickPreset(user);
+    await submit(user);
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    expect(bodies[0]!.instances).toEqual([
+      {
+        host: '10.0.1.11',
+        sshPort: 22,
+        logPath: '/app/logs/application.log',
+        username: 'app',
+        authType: 'PASSWORD',
+        password: 'pw1',
+      },
+      {
+        host: '10.0.1.12',
+        sshPort: 22,
+        logPath: '/app/logs/application.log',
+        username: 'app',
+        authType: 'KEY',
+        privateKey: 'KEY2',
+      },
+    ]);
+  });
+
+  test('at most 20 instances', async () => {
+    const { user } = renderForm();
+    const add = screen.getByRole('button', { name: '+ Add instance' });
+    for (let i = 1; i < 20; i++) await user.click(add);
+    expect(screen.getAllByRole('group', { name: /^Instance #/ })).toHaveLength(20);
+    expect(add).toBeDisabled();
+  });
+
+  test('required fields are checked per instance', async () => {
+    const { user } = renderForm();
+    await user.click(screen.getByRole('button', { name: '+ Add instance' }));
+    await fillRow(user, 1, '10.0.1.11');
+    await user.type(rowPassword(1), 'pw');
+    await submit(user);
+    expect(row(1).getByRole('textbox', { name: /^Host/ })).not.toHaveAccessibleDescription();
+    expect(row(2).getByRole('textbox', { name: /^Host/ })).toHaveAccessibleDescription('Required');
+    expect(rowPassword(2)).toHaveAccessibleDescription('Password is required');
+  });
+
+  test('edit: keeps instance ids; "Secret stored" per instance and a blank secret is omitted (kept)', async () => {
+    const bodies = captureServerBodies();
+    const { user, onSaved } = renderForm(order);
+    expect(row(1).getByRole('textbox', { name: /^Private key/ })).toHaveAccessibleDescription(
+      /Secret stored/,
+    );
+    expect(rowPassword(2)).toHaveAccessibleDescription(/Secret stored/);
     await submit(user, /Save/);
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
-    expect(bodies[0]).not.toHaveProperty('privateKey');
-    expect(bodies[0]).not.toHaveProperty('password');
+    const [a, b] = bodies[0]!.instances as Record<string, unknown>[];
+    expect(a).toMatchObject({ id: 11, host: '10.0.1.21', authType: 'KEY' });
+    expect(b).toMatchObject({ id: 12, host: '10.0.1.22', username: 'deploy2', authType: 'PASSWORD' });
+    for (const i of [a, b]) {
+      expect(i).not.toHaveProperty('privateKey');
+      expect(i).not.toHaveProperty('password');
+    }
     expect(bodies[0]).toMatchObject({ logPatternKey: 'SPRING_BOOT_3', customLogRegex: null });
   });
 
-  test('changed authType requires a new secret', async () => {
+  test("edit: changing one instance's authType requires a new secret for that instance only", async () => {
     const bodies = captureServerBodies();
-    const { user, onSaved } = renderForm(keyServer);
-    await user.click(screen.getByRole('radio', { name: 'Password' }));
-    expect(passwordInput()).toHaveAccessibleDescription(/Auth type changed/);
+    const { user, onSaved } = renderForm(order);
+    await user.click(row(1).getByRole('radio', { name: 'Password' }));
+    expect(rowPassword(1)).toHaveAccessibleDescription(/Auth type changed/);
     await submit(user, /Save/);
-    expect(passwordInput()).toHaveAccessibleDescription(/Password is required/);
+    expect(rowPassword(1)).toHaveAccessibleDescription(/Password is required/);
+    expect(rowPassword(2)).toHaveAccessibleDescription(/Secret stored/);
     expect(bodies).toHaveLength(0);
 
-    await user.type(passwordInput(), 's3cret');
+    await user.type(rowPassword(1), 's3cret');
     await submit(user, /Save/);
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
-    expect(bodies[0]).toMatchObject({ authType: 'PASSWORD', password: 's3cret' });
+    const [a, b] = bodies[0]!.instances as Record<string, unknown>[];
+    expect(a).toMatchObject({ id: 11, authType: 'PASSWORD', password: 's3cret' });
+    expect(b).not.toHaveProperty('password');
+  });
+
+  test('edit: a new instance has no id and needs a secret; a removed one is not sent', async () => {
+    const bodies = captureServerBodies();
+    const { user, onSaved } = renderForm(order);
+    await user.click(row(1).getByRole('button', { name: 'Remove instance #1' }));
+    await user.click(screen.getByRole('button', { name: '+ Add instance' }));
+    await fillRow(user, 2, '10.0.1.23');
+    expect(rowPassword(2)).not.toHaveAccessibleDescription(/Secret stored/);
+    await submit(user, /Save/);
+    expect(rowPassword(2)).toHaveAccessibleDescription('Password is required');
+    await user.type(rowPassword(2), 'pw3');
+    await submit(user, /Save/);
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    const instances = bodies[0]!.instances as Record<string, unknown>[];
+    expect(instances.map((i) => i.id)).toEqual([12, undefined]);
+    expect(instances[1]).toMatchObject({ host: '10.0.1.23', password: 'pw3' });
+  });
+
+  test('server errors on instances[N].field land on that row (mock API: duplicate host/port/path)', async () => {
+    const { user, onSaved } = renderForm();
+    await user.type(textbox(/^Name/), 'dup-api');
+    await user.click(screen.getByRole('button', { name: '+ Add instance' }));
+    for (const n of [1, 2]) {
+      await fillRow(user, n, '10.0.1.11');
+      await user.type(rowPassword(n), 'pw');
+    }
+    await pickPreset(user);
+    await submit(user);
+    await waitFor(() =>
+      expect(row(2).getByRole('textbox', { name: /^Host/ })).toHaveAccessibleDescription(
+        'duplicate host, port and log path',
+      ),
+    );
+    expect(row(1).getByRole('textbox', { name: /^Host/ })).not.toHaveAccessibleDescription();
+    expect(onSaved).not.toHaveBeenCalled();
+  });
+
+  test('nested server errors: field, secret and unknown id go to their row; list errors under the list', async () => {
+    server.use(
+      http.put('*/api/servers/:id', () =>
+        HttpResponse.json(
+          {
+            code: 'VALIDATION_FAILED',
+            message: 'Validation failed',
+            details: {
+              fields: {
+                'instances[0].logPath': 'must not be blank',
+                'instances[1].privateKey': 'required',
+                'instances[1].id': 'not an instance of this server',
+                'instances[5].host': 'no such row',
+                instances: 'size must be between 1 and 20',
+              },
+            },
+          },
+          { status: 400 },
+        ),
+      ),
+    );
+    const { user, onSaved } = renderForm(order);
+    await user.click(row(2).getByRole('radio', { name: 'Private key' }));
+    await user.type(row(2).getByRole('textbox', { name: /^Private key/ }), 'K');
+    await submit(user, /Save/);
+    await waitFor(() =>
+      expect(row(1).getByRole('textbox', { name: /^Log path/ })).toHaveAccessibleDescription(
+        'must not be blank',
+      ),
+    );
+    expect(row(2).getByRole('textbox', { name: /^Private key/ })).toHaveAccessibleDescription(/required/);
+    expect(row(2).getByRole('textbox', { name: /^Host/ })).toHaveAccessibleDescription(
+      'not an instance of this server',
+    );
+    expect(screen.getByText('size must be between 1 and 20')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('instances[5].host: no such row');
+    expect(onSaved).not.toHaveBeenCalled();
   });
 });
 
@@ -163,7 +319,13 @@ describe('server errors', () => {
           {
             code: 'VALIDATION_FAILED',
             message: 'Validation failed',
-            details: { fields: { host: 'unresolvable host', charset: 'unknown charset', secretEnc: 'boom' } },
+            details: {
+              fields: {
+                'instances[0].host': 'unresolvable host',
+                charset: 'unknown charset',
+                secretEnc: 'boom',
+              },
+            },
           },
           { status: 400 },
         ),

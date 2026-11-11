@@ -42,6 +42,8 @@ test('placeholders are inserted at the cursor', async () => {
   (content as HTMLTextAreaElement).setSelectionRange(1, 1);
   await user.click(d.getByRole('button', { name: '{{serverName}}' }));
   expect(content).toHaveValue('A{{serverName}}B');
+  await user.click(d.getByRole('button', { name: '{{host}}' })); // instance host (F9)
+  expect(content).toHaveValue('A{{serverName}}{{host}}B');
 });
 
 test("the backend's 400 on content is shown on the content field", async () => {

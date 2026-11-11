@@ -66,7 +66,8 @@ function serverInfo(serverId: number) {
 }
 
 function toDetail(log: fx.MockErrorLog): S['ErrorLogDetail'] {
-  const { rawLines, cropStart, cropEnd, anchorLine, ...rest } = log;
+  const { raw, cropStart, cropEnd, anchorLine, ...rest } = log;
+  const rawLines = raw[log.instance.id].lines;
   const [head, tail] = fx.ENTRIES[anchorLine];
   return {
     ...rest,
@@ -94,6 +95,7 @@ function toSummary(log: fx.MockErrorLog): S['ErrorLogSummary'] {
     serverId,
     serverName,
     serverTimezone,
+    instance,
     requestedTime,
     exceptionClass,
     exceptionMessage,
@@ -105,6 +107,7 @@ function toSummary(log: fx.MockErrorLog): S['ErrorLogSummary'] {
     serverId,
     serverName,
     serverTimezone,
+    instance,
     requestedTime,
     exceptionClass,
     exceptionMessage,
@@ -113,11 +116,15 @@ function toSummary(log: fx.MockErrorLog): S['ErrorLogSummary'] {
   };
 }
 
-function cropAround(log: fx.MockErrorLog, anchorLine: number) {
+const rawLinesOf = (log: fx.MockErrorLog) => log.raw[log.instance.id].lines;
+
+/** Moves the crop to a candidate, on that candidate's instance (no re-download). */
+function cropAround(log: fx.MockErrorLog, anchorLine: number, instanceId: number) {
   const [head, tail] = fx.ENTRIES[anchorLine];
+  log.instance = log.raw[instanceId].ref;
   log.anchorLine = anchorLine;
   log.cropStart = Math.max(1, head - CONTEXT_BEFORE);
-  log.cropEnd = Math.min(log.rawLines.length, tail + CONTEXT_AFTER);
+  log.cropEnd = Math.min(rawLinesOf(log).length, tail + CONTEXT_AFTER);
 }
 
 export const MOCK_REPLY =
@@ -147,10 +154,33 @@ function poll(a: S['AnalysisDto']) {
 
 const findLog = (id: string) => db.errorLogs.find((l) => l.id === id);
 
+const MAX_INSTANCES = 20;
+
+/** Bean-validation style field keys: `instances`, `instances[1].host`, … (contract v2). */
 function validateServer(body: S['ServerUpsert'], existing?: S['ServerDto']) {
   const fields: Record<string, string> = {};
-  for (const f of ['name', 'host', 'username', 'logPath'] as const)
-    if (!body[f]?.trim()) fields[f] = 'must not be blank';
+  if (!body.name?.trim()) fields.name = 'must not be blank';
+  const instances = body.instances ?? [];
+  if (instances.length < 1 || instances.length > MAX_INSTANCES)
+    fields.instances = `size must be between 1 and ${MAX_INSTANCES}`;
+  const seen = new Set<string>();
+  instances.forEach((inst, n) => {
+    const at = (f: string) => `instances[${n}].${f}`;
+    for (const f of ['host', 'logPath', 'username'] as const)
+      if (!inst[f]?.trim()) fields[at(f)] = 'must not be blank';
+    const sshPort = inst.sshPort ?? 22;
+    if (!(Number.isInteger(sshPort) && sshPort >= 1 && sshPort <= 65535))
+      fields[at('sshPort')] = 'must be between 1 and 65535';
+    const key = `${inst.host}:${sshPort}:${inst.logPath}`;
+    if (seen.has(key) && !fields[at('host')]) fields[at('host')] = 'duplicate host, port and log path';
+    seen.add(key);
+    const stored = inst.id == null ? undefined : existing?.instances.find((i) => i.id === inst.id);
+    if (inst.id != null && !stored) fields[at('id')] = 'not an instance of this server';
+    // Secret required for a new instance and when its authType changes; otherwise blank = keep.
+    const secretField = inst.authType === 'KEY' ? 'privateKey' : 'password';
+    if (inst.id == null || (stored && stored.authType !== inst.authType))
+      if (!inst[secretField]) fields[at(secretField)] = 'required';
+  });
   if (!body.logPatternKey === !body.customLogRegex)
     fields.logPatternKey = 'exactly one of logPatternKey / customLogRegex is required';
   else if (body.logPatternKey && !fx.logPatterns.some((p) => p.key === body.logPatternKey))
@@ -178,11 +208,56 @@ function validateServer(body: S['ServerUpsert'], existing?: S['ServerDto']) {
   } catch {
     fields.charset = 'unknown charset';
   }
-  // Secret required on create, and on update when authType changes; otherwise blank = keep.
-  const secretField = body.authType === 'KEY' ? 'privateKey' : 'password';
-  if ((!existing || existing.authType !== body.authType) && !body[secretField])
-    fields[secretField] = 'required';
   return fields;
+}
+
+const allInstances = () => [...db.servers, ...db.deletedServers].flatMap((s) => s.instances);
+
+/**
+ * Upsert → active instances, by position. `id` = update that instance (a new host or port forgets its host key),
+ * no `id` = new. Instances missing from the list are dropped (error logs keep their InstanceRef snapshot).
+ */
+function toInstances(body: S['ServerUpsert'], existing?: S['ServerDto']): S['InstanceDto'][] {
+  let next = nextId(allInstances());
+  return body.instances.map(({ id, password: _p, privateKey: _k, ...u }) => {
+    const sshPort = u.sshPort ?? 22;
+    const old = existing?.instances.find((i) => i.id === id);
+    if (old)
+      return {
+        ...old,
+        ...u,
+        sshPort,
+        hostKeyFingerprint: u.host === old.host && sshPort === old.sshPort ? old.hostKeyFingerprint : null,
+        updatedAt: now(),
+      };
+    return {
+      ...u,
+      sshPort,
+      id: next++,
+      hasSecret: true,
+      hostKeyFingerprint: null,
+      createdAt: now(),
+      updatedAt: now(),
+    };
+  });
+}
+
+/** Mock rule: instance 42 and any host containing "down" are unreachable (search and test). */
+const unreachable = (inst: S['InstanceDto']) => inst.id === 42 || inst.host.includes('down');
+const timedOut = (inst: S['InstanceDto']) =>
+  `Timed out after 10s (connecting to ${inst.username}@${inst.host}:${inst.sshPort})`;
+
+/** Connection test rules: unreachable instances time out, server 2 rejects the login, 31's host key "changed". */
+function testFailure(serverId: number, inst: S['InstanceDto']): string | null {
+  if (unreachable(inst)) return timedOut(inst);
+  if (serverId === 2) return 'Auth fail: password rejected';
+  if (inst.id === 31 && inst.hostKeyFingerprint === fx.servers[2].instances[0].hostKeyFingerprint)
+    return (
+      `Host key of ${inst.host}:${inst.sshPort} changed: trusted ${inst.hostKeyFingerprint}, but the server ` +
+      'presented SHA256:mockNewKey. If the server was reinstalled, reset the host key for this server and test ' +
+      'again; otherwise the connection may be intercepted. No credentials were sent.'
+    );
+  return null;
 }
 
 /** Names are unique per resource → 409 DUPLICATE_NAME on `name`. */
@@ -223,19 +298,16 @@ export const handlers = [
     if (Object.keys(fields).length) return invalid(fields);
     const dup = duplicateName(db.servers, body.name);
     if (dup) return dup;
-    const { password: _p, privateKey: _k, ...rest } = body;
     const server: S['ServerDto'] = {
       rotatedPattern: null,
       logPatternKey: null,
       customLogRegex: null,
-      ...rest,
+      ...body,
+      instances: toInstances(body),
       // Absent or null → the contract defaults.
-      sshPort: rest.sshPort ?? 22,
-      timezone: rest.timezone ?? 'Asia/Seoul',
-      charset: rest.charset ?? 'UTF-8',
+      timezone: body.timezone ?? 'Asia/Seoul',
+      charset: body.charset ?? 'UTF-8',
       id: nextId([...db.servers, ...db.deletedServers]),
-      hasSecret: true,
-      hostKeyFingerprint: null,
       createdAt: now(),
       updatedAt: now(),
     };
@@ -250,14 +322,10 @@ export const handlers = [
     if (Object.keys(fields).length) return invalid(fields);
     const dup = duplicateName(db.servers, body.name, server.id);
     if (dup) return dup;
-    const { password: _p, privateKey: _k, ...rest } = body;
-    const sshPort = rest.sshPort ?? 22;
-    // Like the backend: a new host or port forgets the trusted host key.
-    if (rest.host !== server.host || sshPort !== server.sshPort) server.hostKeyFingerprint = null;
-    Object.assign(server, { rotatedPattern: null, logPatternKey: null, customLogRegex: null }, rest, {
-      sshPort,
-      timezone: rest.timezone ?? 'Asia/Seoul',
-      charset: rest.charset ?? 'UTF-8',
+    Object.assign(server, { rotatedPattern: null, logPatternKey: null, customLogRegex: null }, body, {
+      instances: toInstances(body, server),
+      timezone: body.timezone ?? 'Asia/Seoul',
+      charset: body.charset ?? 'UTF-8',
       updatedAt: now(),
     });
     return HttpResponse.json(server);
@@ -275,33 +343,39 @@ export const handlers = [
     const server = db.servers.find((s) => s.id === Number(params.id));
     if (!server) return notFound('Server');
     await delay(500);
-    const fail = (message: string) =>
-      HttpResponse.json<S['ConnectionTestResult']>({
-        ok: false,
-        message,
-        logFileFound: false,
-        logFileSize: null,
-      });
-    if (server.id === 2) return fail('Auth fail: password rejected');
-    // Server 3's host key "changed" until it is reset (then the new key is trusted on first use).
-    if (server.id === 3 && server.hostKeyFingerprint === fx.servers[2].hostKeyFingerprint)
-      return fail(
-        `Host key of ${server.host}:${server.sshPort} changed: trusted ${server.hostKeyFingerprint}, but the server ` +
-          'presented SHA256:mockNewKey. If the server was reinstalled, reset the host key for this server and test ' +
-          'again; otherwise the connection may be intercepted. No credentials were sent.',
-      );
-    server.hostKeyFingerprint ??= `SHA256:mockPinned${server.id}`;
-    return HttpResponse.json<S['ConnectionTestResult']>({
-      ok: true,
-      message: `Connected. Host key ${server.hostKeyFingerprint}`,
-      logFileFound: true,
-      logFileSize: 52_428_800,
+    const results = server.instances.map((inst): S['InstanceTestResult'] => {
+      const { host, sshPort, logPath } = inst;
+      const failure = testFailure(server.id, inst);
+      if (failure)
+        return {
+          instanceId: inst.id,
+          host,
+          sshPort,
+          logPath,
+          ok: false,
+          message: failure,
+          logFileFound: false,
+          logFileSize: null,
+        };
+      inst.hostKeyFingerprint ??= `SHA256:mockPinned${inst.id}`; // trusted on first use
+      return {
+        instanceId: inst.id,
+        host,
+        sshPort,
+        logPath,
+        ok: true,
+        message: `Connected. Host key ${inst.hostKeyFingerprint}`,
+        logFileFound: true,
+        logFileSize: 52_428_800,
+      };
     });
+    return HttpResponse.json<S['ConnectionTestResult']>({ ok: results.every((r) => r.ok), results });
   }),
-  http.post(`${API}/servers/:id/reset-host-key`, ({ params }) => {
+  http.post(`${API}/servers/:id/instances/:instanceId/reset-host-key`, ({ params }) => {
     const server = db.servers.find((s) => s.id === Number(params.id));
-    if (!server) return notFound('Server');
-    server.hostKeyFingerprint = null;
+    const inst = server?.instances.find((i) => i.id === Number(params.instanceId));
+    if (!server || !inst) return notFound(server ? 'Instance' : 'Server');
+    inst.hostKeyFingerprint = null;
     return HttpResponse.json(server);
   }),
   http.get(`${API}/log-patterns`, () => HttpResponse.json(fx.logPatterns)),
@@ -318,7 +392,31 @@ export const handlers = [
     const server = db.servers.find((s) => s.id === body.serverId); // soft-deleted servers can't be searched
     if (!server) return notFound('Server');
     await delay(1500); // real fetch takes seconds
-    // Mock rules: server 2 never has exceptions; server 3 can't be fetched.
+    // Every instance is read; failed ones are reported, the rest are searched.
+    const failures: S['FetchFailure'][] = [];
+    const ok: S['InstanceRef'][] = [];
+    for (const inst of server.instances) {
+      // Mock rules: no instance of server 3 can be read; unreachable instances time out.
+      const message =
+        server.id === 3
+          ? `SFTP: no such file ${inst.logPath} on ${inst.host}`
+          : unreachable(inst)
+            ? timedOut(inst)
+            : null;
+      const { id, ...where } = fx.instanceRef(inst);
+      if (message) failures.push({ instanceId: id, ...where, message });
+      else ok.push({ id, ...where });
+    }
+    if (!ok.length)
+      return apiError(
+        502,
+        'FETCH_FAILED',
+        failures.map((f) => `${f.host}:${f.sshPort}: ${f.message}`).join('; '),
+        {
+          failures,
+        },
+      );
+    // Mock rule: server 2 never has exceptions.
     if (server.id === 2) {
       const at = Date.parse(body.errorTime);
       return apiError(404, 'NO_EXCEPTION_FOUND', `No exception within ±${windowMin} min`, {
@@ -326,20 +424,22 @@ export const handlers = [
         windowMin,
         from: new Date(at - windowMin * 60_000).toISOString(),
         to: new Date(at + windowMin * 60_000).toISOString(),
+        searchedInstances: ok,
+        failures,
       });
     }
-    if (server.id === 3)
-      return apiError(502, 'FETCH_FAILED', `SFTP: no such file ${server.logPath} on ${server.host}`);
     // Error ID date = creation date in Asia/Seoul (contract).
     const ymd = formatInTz(now(), 'Asia/Seoul').slice(0, 10).replaceAll('-', '');
     const log: fx.MockErrorLog = {
       ...structuredClone(fx.errorLogs[0]),
+      ...fx.fetched(ok),
       id: `${ymd}-${String(++db.seq).padStart(3, '0')}`,
       serverId: server.id,
       requestedTime: new Date(body.errorTime).toISOString(), // responses are UTC
       windowMin,
       status: 'CROPPED',
       createdAt: now(),
+      fetchFailures: failures,
     };
     db.errorLogs.unshift(log);
     return HttpResponse.json(toDetail(log), { status: 201 });
@@ -383,19 +483,23 @@ export const handlers = [
     if (!log) return notFound('Error log');
     if (log.status !== 'CROPPED') return invalidStatus(log, 'RECROP');
     const body = (await request.json()) as S['CropRequest'];
+    if (body.instanceId != null && body.anchorLine == null)
+      return invalid({ instanceId: 'Only together with anchorLine' });
     if (body.anchorLine == null && body.expandBefore == null && body.expandAfter == null)
       return invalid({ anchorLine: 'Give expandBefore, expandAfter or anchorLine' });
     if (body.anchorLine != null) {
-      if (!log.candidates.some((c) => c.anchorLine === body.anchorLine))
+      // Absent instanceId = the current instance (old clients on single-instance servers).
+      const instanceId = body.instanceId ?? log.instance.id;
+      if (!log.candidates.some((c) => c.anchorLine === body.anchorLine && c.instanceId === instanceId))
         return invalid({ anchorLine: 'Not a candidate' });
-      cropAround(log, body.anchorLine);
+      cropAround(log, body.anchorLine, instanceId);
     }
     // Expansion beyond maxLines is clamped silently (before first, then after).
     if (body.expandBefore)
       log.cropStart = Math.max(1, log.cropStart - body.expandBefore, log.cropEnd - MAX_LINES + 1);
     if (body.expandAfter)
       log.cropEnd = Math.min(
-        log.rawLines.length,
+        rawLinesOf(log).length,
         log.cropEnd + body.expandAfter,
         log.cropStart + MAX_LINES - 1,
       );

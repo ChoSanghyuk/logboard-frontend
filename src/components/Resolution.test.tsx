@@ -44,7 +44,7 @@ test.each([
     ),
   );
   await open();
-  await screen.findAllByText(/Cropped|Confirmed|Analyzed|Dev required|Terminated|Discarded/);
+  await screen.findAllByText(/추출됨|확인됨|분석됨|개발자 확인 필요|종료됨|폐기됨/);
   expect(!!terminateBtn()).toBe(terminate);
   expect(!!devBtn()).toBe(dev);
 });
@@ -70,7 +70,7 @@ test('Terminate: blank is rejected client-side; a resolution terminates and show
   expect(resolved.getByText('Resolved by user')).toBeInTheDocument();
   expect(resolved.getByText('fixed in #42')).toBeInTheDocument();
   expect(resolved.getByText(/\(Asia\/Seoul\)/)).toBeInTheDocument();
-  expect(screen.getByText('Terminated')).toBeInTheDocument();
+  expect(screen.getByText('종료됨')).toBeInTheDocument();
   expect(terminateBtn()).not.toBeInTheDocument();
 });
 
@@ -85,7 +85,7 @@ test('Developer needed: note is sent; the log shows the dev-required note and on
   expect(dialog.getByRole('textbox', { name: /Note/ })).toHaveAccessibleDescription('Required');
   await user.type(dialog.getByRole('textbox', { name: /Note/ }), 'guard customer in OrderService');
   await user.click(dialog.getByRole('button', { name: 'Mark as developer needed' }));
-  expect(await screen.findByText('Dev required')).toBeInTheDocument();
+  expect(await screen.findByText('개발자 확인 필요')).toBeInTheDocument();
   expect(bodies).toEqual([{ note: 'guard customer in OrderService' }]);
   expect(screen.getByText('Developer needed')).toBeInTheDocument(); // alert title
   expect(screen.getByText('guard customer in OrderService')).toBeInTheDocument();
@@ -138,7 +138,7 @@ test('409 INVALID_STATUS: closes the modal, shows a message and refetches', asyn
   await user.click(dialog.getByRole('button', { name: 'Mark as developer needed' }));
   expect(await screen.findByText('Status changed')).toBeInTheDocument();
   await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-  expect(await screen.findByText('Terminated')).toBeInTheDocument();
+  expect(await screen.findByText('종료됨')).toBeInTheDocument();
   expect(screen.getByText('done elsewhere')).toBeInTheDocument();
 });
 

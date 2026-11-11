@@ -4,6 +4,7 @@ import {
   Autocomplete,
   Button,
   Code,
+  Fieldset,
   Group,
   NumberInput,
   PasswordInput,
@@ -16,21 +17,38 @@ import {
   TextInput,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
-import { type ServerDto, type ServerUpsert, useLogPatterns, useSaveServer } from '../api/servers';
+import { randomId } from '@mantine/hooks';
+import {
+  type InstanceDto,
+  type InstanceUpsert,
+  type ServerDto,
+  type ServerUpsert,
+  useLogPatterns,
+  useSaveServer,
+} from '../api/servers';
 import { applyApiErrors } from '../lib/formErrors';
 import { missingGroups, rotatedPatternError } from '../lib/logPattern';
 
 const TIMEZONES = Intl.supportedValuesOf('timeZone');
+const MAX_INSTANCES = 20;
+
+type InstanceValues = {
+  /** React key only, never sent. */
+  key: string;
+  /** Existing instance (kept on edit); undefined = new. */
+  id: number | undefined;
+  host: string;
+  sshPort: number | string;
+  logPath: string;
+  username: string;
+  authType: InstanceUpsert['authType'];
+  password: string;
+  privateKey: string;
+};
 
 type Values = {
   name: string;
-  host: string;
-  sshPort: number | string;
-  username: string;
-  authType: ServerUpsert['authType'];
-  password: string;
-  privateKey: string;
-  logPath: string;
+  instances: InstanceValues[];
   rotatedPattern: string;
   patternMode: 'PRESET' | 'CUSTOM';
   logPatternKey: string | null;
@@ -50,16 +68,24 @@ function isTimezone(tz: string) {
   }
 }
 
+function instanceValues(i?: InstanceDto): InstanceValues {
+  return {
+    key: randomId(),
+    id: i?.id,
+    host: i?.host ?? '',
+    sshPort: i?.sshPort ?? 22,
+    logPath: i?.logPath ?? '',
+    username: i?.username ?? '',
+    authType: i?.authType ?? 'PASSWORD',
+    password: '',
+    privateKey: '',
+  };
+}
+
 function initialValues(s?: ServerDto): Values {
   return {
     name: s?.name ?? '',
-    host: s?.host ?? '',
-    sshPort: s?.sshPort ?? 22,
-    username: s?.username ?? '',
-    authType: s?.authType ?? 'PASSWORD',
-    password: '',
-    privateKey: '',
-    logPath: s?.logPath ?? '',
+    instances: s ? s.instances.map(instanceValues) : [instanceValues()],
     rotatedPattern: s?.rotatedPattern ?? '',
     patternMode: s?.customLogRegex ? 'CUSTOM' : 'PRESET',
     logPatternKey: s?.logPatternKey ?? null,
@@ -69,17 +95,24 @@ function initialValues(s?: ServerDto): Values {
   };
 }
 
+function toInstanceUpsert(i: InstanceValues): InstanceUpsert {
+  const secretField = i.authType === 'KEY' ? 'privateKey' : 'password';
+  return {
+    ...(i.id !== undefined ? { id: i.id } : {}),
+    host: i.host.trim(),
+    sshPort: Number(i.sshPort),
+    logPath: i.logPath.trim(),
+    username: i.username.trim(),
+    authType: i.authType,
+    // Blank secret is omitted: on update the backend keeps that instance's stored one.
+    ...(i[secretField] ? { [secretField]: i[secretField] } : {}),
+  };
+}
+
 function toUpsert(v: Values): ServerUpsert {
-  const secretField = v.authType === 'KEY' ? 'privateKey' : 'password';
   return {
     name: v.name.trim(),
-    host: v.host.trim(),
-    sshPort: Number(v.sshPort),
-    username: v.username.trim(),
-    authType: v.authType,
-    // Blank secret is omitted: on update the backend keeps the stored one.
-    ...(v[secretField] ? { [secretField]: v[secretField] } : {}),
-    logPath: v.logPath.trim(),
+    instances: v.instances.map(toInstanceUpsert),
     rotatedPattern: v.rotatedPattern.trim() || null,
     logPatternKey: v.patternMode === 'PRESET' ? v.logPatternKey : null,
     customLogRegex: v.patternMode === 'CUSTOM' ? v.customLogRegex : null,
@@ -102,22 +135,31 @@ export function ServerForm({
   const save = useSaveServer();
   const [formError, setFormError] = useState<string | null>(null);
 
-  // Secret is required on create, and on edit when authType changes.
-  const secretRequired = (v: Values) => !server || server.authType !== v.authType;
+  const stored = (i: InstanceValues) => server?.instances.find((s) => s.id === i.id);
+  // A secret is required for a new instance, and when an instance's authType changes.
+  const secretRequired = (i: InstanceValues) => stored(i)?.authType !== i.authType;
+  // Rule path is `instances.N.field`.
+  const rowOf = (all: Values, path: string) => all.instances[Number(path.split('.')[1])];
 
   const form = useForm<Values>({
     initialValues: initialValues(server),
     validate: {
       name: required,
-      host: required,
-      username: required,
-      logPath: required,
-      sshPort: (v) =>
-        Number.isInteger(Number(v)) && Number(v) >= 1 && Number(v) <= 65535 ? null : '1–65535',
-      password: (v, all) =>
-        all.authType === 'PASSWORD' && secretRequired(all) && !v ? 'Password is required' : null,
-      privateKey: (v, all) =>
-        all.authType === 'KEY' && secretRequired(all) && !v.trim() ? 'Private key is required' : null,
+      instances: {
+        host: required,
+        username: required,
+        logPath: required,
+        sshPort: (v) =>
+          Number.isInteger(Number(v)) && Number(v) >= 1 && Number(v) <= 65535 ? null : '1–65535',
+        password: (v, all, path) => {
+          const i = rowOf(all, path);
+          return i.authType === 'PASSWORD' && secretRequired(i) && !v ? 'Password is required' : null;
+        },
+        privateKey: (v, all, path) => {
+          const i = rowOf(all, path);
+          return i.authType === 'KEY' && secretRequired(i) && !v.trim() ? 'Private key is required' : null;
+        },
+      },
       logPatternKey: (v, all) => (all.patternMode === 'PRESET' && !v ? 'Select a log pattern' : null),
       rotatedPattern: (v) => (v.trim() ? rotatedPatternError(v) : null),
       customLogRegex: (v, all) => {
@@ -142,21 +184,24 @@ export function ServerForm({
         onSuccess: onSaved,
         onError: (error) =>
           setFormError(
-            // "exactly one of" comes back on logPatternKey; show it on whichever pattern input is visible.
             applyApiErrors(error, form, (f) =>
-              f === 'logPatternKey' && values.patternMode === 'CUSTOM' ? 'customLogRegex' : f,
+              // "exactly one of" comes back on logPatternKey; show it on whichever pattern input is visible.
+              f === 'logPatternKey' && values.patternMode === 'CUSTOM'
+                ? 'customLogRegex'
+                : // An unknown instance id has no input: show it on that row's host.
+                  f.replace(/^(instances\.\d+)\.id$/, '$1.host'),
             ),
           ),
       },
     );
   };
 
-  const storedHint =
-    server?.hasSecret && server.authType === v.authType
-      ? 'Secret stored — leave blank to keep it.'
-      : server && server.authType !== v.authType
-        ? 'Auth type changed — enter a new secret.'
-        : undefined;
+  const storedHint = (i: InstanceValues) => {
+    const s = stored(i);
+    if (!s) return undefined;
+    if (s.authType !== i.authType) return 'Auth type changed — enter a new secret.';
+    return s.hasSecret ? 'Secret stored — leave blank to keep it.' : undefined;
+  };
   const preset = patterns.data?.find((p) => p.key === v.logPatternKey);
 
   return (
@@ -168,68 +213,108 @@ export function ServerForm({
           </Alert>
         )}
         <TextInput label="Name" withAsterisk {...form.getInputProps('name')} />
-        <SimpleGrid cols={{ base: 1, sm: 3 }}>
-          <TextInput
-            label="Host"
-            withAsterisk
-            style={{ gridColumn: 'span 2' }}
-            {...form.getInputProps('host')}
-          />
-          <NumberInput
-            label="SSH port"
-            min={1}
-            max={65535}
-            allowDecimal={false}
-            {...form.getInputProps('sshPort')}
-          />
-        </SimpleGrid>
-        <TextInput label="Username" withAsterisk {...form.getInputProps('username')} />
-
-        <Stack gap={4}>
+        <Stack gap="xs">
           <Text size="sm" fw={500}>
-            Authentication
+            Instances
           </Text>
-          <SegmentedControl
-            data={[
-              { label: 'Password', value: 'PASSWORD' },
-              { label: 'Private key', value: 'KEY' },
-            ]}
-            {...form.getInputProps('authType')}
-          />
+          {v.instances.map((inst, n) => {
+            const at = (field: keyof InstanceValues) => form.getInputProps(`instances.${n}.${field}`);
+            const label = `Instance #${n + 1}`;
+            return (
+              <Fieldset key={inst.key} legend={label} p="sm">
+                <Stack gap="xs">
+                  <SimpleGrid cols={{ base: 1, sm: 3 }}>
+                    <TextInput label="Host" withAsterisk style={{ gridColumn: 'span 2' }} {...at('host')} />
+                    <NumberInput
+                      label="SSH port"
+                      min={1}
+                      max={65535}
+                      allowDecimal={false}
+                      {...at('sshPort')}
+                    />
+                  </SimpleGrid>
+                  <TextInput
+                    label="Log path"
+                    withAsterisk
+                    placeholder="/var/log/app/application.log"
+                    {...at('logPath')}
+                  />
+                  <SimpleGrid cols={{ base: 1, sm: 2 }}>
+                    <TextInput label="Username" withAsterisk {...at('username')} />
+                    <Stack gap={4}>
+                      <Text size="sm" fw={500}>
+                        Authentication
+                      </Text>
+                      <SegmentedControl
+                        data={[
+                          { label: 'Password', value: 'PASSWORD' },
+                          { label: 'Private key', value: 'KEY' },
+                        ]}
+                        {...at('authType')}
+                      />
+                    </Stack>
+                  </SimpleGrid>
+                  {inst.authType === 'PASSWORD' ? (
+                    <PasswordInput
+                      label="Password"
+                      withAsterisk={secretRequired(inst)}
+                      description={storedHint(inst)}
+                      autoComplete="new-password"
+                      {...at('password')}
+                    />
+                  ) : (
+                    <>
+                      <Textarea
+                        label="Private key"
+                        withAsterisk={secretRequired(inst)}
+                        description={storedHint(inst)}
+                        placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                        autosize
+                        minRows={4}
+                        maxRows={10}
+                        styles={{ input: { fontFamily: 'var(--mantine-font-family-monospace)' } }}
+                        {...at('privateKey')}
+                      />
+                      <Text size="xs" c="dimmed">
+                        Passphrase-protected keys are not supported.
+                      </Text>
+                    </>
+                  )}
+                  <Group justify="flex-end">
+                    <Button
+                      variant="subtle"
+                      color="red"
+                      size="xs"
+                      disabled={v.instances.length <= 1}
+                      onClick={() => form.removeListItem('instances', n)}
+                    >
+                      Remove instance #{n + 1}
+                    </Button>
+                  </Group>
+                </Stack>
+              </Fieldset>
+            );
+          })}
+          {typeof form.errors.instances === 'string' && (
+            <Text size="sm" c="red">
+              {form.errors.instances}
+            </Text>
+          )}
+          <Group>
+            <Button
+              variant="light"
+              size="xs"
+              disabled={v.instances.length >= MAX_INSTANCES}
+              onClick={() => form.insertListItem('instances', instanceValues())}
+            >
+              + Add instance
+            </Button>
+            <Text size="xs" c="dimmed">
+              1–{MAX_INSTANCES} instances. A search reads all of them.
+            </Text>
+          </Group>
         </Stack>
-        {v.authType === 'PASSWORD' ? (
-          <PasswordInput
-            label="Password"
-            withAsterisk={secretRequired(v)}
-            description={storedHint}
-            autoComplete="new-password"
-            {...form.getInputProps('password')}
-          />
-        ) : (
-          <Textarea
-            label="Private key"
-            withAsterisk={secretRequired(v)}
-            description={storedHint}
-            placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
-            autosize
-            minRows={4}
-            maxRows={10}
-            styles={{ input: { fontFamily: 'var(--mantine-font-family-monospace)' } }}
-            {...form.getInputProps('privateKey')}
-          />
-        )}
-        {v.authType === 'KEY' && (
-          <Text size="xs" c="dimmed" mt={-8}>
-            Passphrase-protected keys are not supported.
-          </Text>
-        )}
 
-        <TextInput
-          label="Log path"
-          withAsterisk
-          placeholder="/var/log/app/application.log"
-          {...form.getInputProps('logPath')}
-        />
         <TextInput
           label="Rotated file pattern"
           placeholder="application-%d{yyyy-MM-dd}-%i.log.gz"

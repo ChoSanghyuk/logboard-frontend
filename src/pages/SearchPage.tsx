@@ -4,11 +4,15 @@ import { DateInput } from '@mantine/dates';
 import { useForm } from '@mantine/form';
 import { useNavigate } from 'react-router';
 import { ApiRequestError } from '../api/client';
+import type { components } from '../api/schema';
 import { useSearchErrorLog } from '../api/errorLogs';
 import { useServers } from '../api/servers';
 import { formatInTz } from '../lib/format';
 import { applyApiErrors } from '../lib/formErrors';
 import { isWallTime, offsetLabel, zonedWallTimeToIso } from '../lib/timezone';
+
+type FetchFailure = components['schemas']['FetchFailure'];
+type InstanceRef = components['schemas']['InstanceRef'];
 
 const WINDOWS = [1, 2, 5, 10, 30];
 const INLINE_CODES = ['NO_EXCEPTION_FOUND', 'FETCH_FAILED'];
@@ -19,6 +23,19 @@ type Values = {
   time: string | null;
   windowMin: string;
 };
+
+/** `details.failures` of NO_EXCEPTION_FOUND / FETCH_FAILED: instances that could not be read. */
+function FailureList({ failures }: { failures: FetchFailure[] }) {
+  return (
+    <Stack gap={2} mt={4}>
+      {failures.map((f) => (
+        <Text size="sm" key={f.instanceId}>
+          {f.host}:{f.sshPort}: {f.message}
+        </Text>
+      ))}
+    </Stack>
+  );
+}
 
 const parseWallTime = (s: string) => (isWallTime(s.trim()) ? s.trim() : null);
 
@@ -79,6 +96,8 @@ export function SearchPage() {
   };
 
   const error = search.error instanceof ApiRequestError ? search.error : null;
+  const failures = (error?.details.failures ?? []) as FetchFailure[];
+  const searched = (error?.details.searchedInstances ?? []) as InstanceRef[];
   const searchedServer = serverOf(search.variables?.serverId);
 
   return (
@@ -153,11 +172,24 @@ export function SearchPage() {
             {Number(search.variables?.windowMin) < 30
               ? ' Try a wider window or check the time.'
               : ' Check the time and the server.'}
+            {searched.length > 0 && (
+              <Text size="sm" mt={4}>
+                Searched: {searched.map((i) => `${i.host}:${i.sshPort}`).join(', ')}
+              </Text>
+            )}
+            {failures.length > 0 && (
+              <>
+                <Text size="sm" mt={4} fw={500}>
+                  Not read (the error may be there):
+                </Text>
+                <FailureList failures={failures} />
+              </>
+            )}
           </Alert>
         )}
         {error?.code === 'FETCH_FAILED' && (
           <Alert color="red" title="Could not fetch the log">
-            {error.message}
+            {failures.length ? <FailureList failures={failures} /> : error.message}
           </Alert>
         )}
       </Stack>

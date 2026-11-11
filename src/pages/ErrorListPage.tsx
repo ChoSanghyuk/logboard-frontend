@@ -1,4 +1,5 @@
 import {
+  ActionIcon,
   Alert,
   Anchor,
   Button,
@@ -6,7 +7,9 @@ import {
   Loader,
   MultiSelect,
   Pagination,
+  Popover,
   Select,
+  Stack,
   Table,
   Text,
   Title,
@@ -16,21 +19,17 @@ import { Link, useNavigate, useSearchParams } from 'react-router';
 import { type ErrorLogListQuery, useErrorLogs } from '../api/errorLogs';
 import type { components } from '../api/schema';
 import { useServers } from '../api/servers';
-import { StatusBadge } from '../components/StatusBadge';
+import { STATUS_META, StatusBadge } from '../components/StatusBadge';
 import { formatInTz } from '../lib/format';
 import { zonedWallTimeToIso } from '../lib/timezone';
 
 type ErrorStatus = components['schemas']['ErrorLogSummary']['status'];
 
 const PAGE_SIZE = 20;
-const STATUSES: { value: ErrorStatus; label: string }[] = [
-  { value: 'CROPPED', label: 'Cropped' },
-  { value: 'CONFIRMED', label: 'Confirmed' },
-  { value: 'ANALYZED', label: 'Analyzed' },
-  { value: 'DEV_REQUIRED', label: 'Dev required' },
-  { value: 'TERMINATED', label: 'Terminated' },
-  { value: 'DISCARDED', label: 'Discarded' },
-];
+const STATUSES = (Object.keys(STATUS_META) as ErrorStatus[]).map((value) => ({
+  value,
+  label: STATUS_META[value].label,
+}));
 /** Open work: everything except TERMINATED / DISCARDED. Used when the URL has no `status`. */
 const DEFAULT_STATUSES: ErrorStatus[] = ['CROPPED', 'CONFIRMED', 'ANALYZED', 'DEV_REQUIRED'];
 
@@ -97,16 +96,40 @@ export function ErrorListPage() {
         Errors
       </Title>
       <Group align="flex-end" mb="md">
-        <MultiSelect
-          label="Status"
-          placeholder={statuses.length ? undefined : 'Any status'}
-          data={STATUSES}
-          value={statuses}
-          onChange={(v) => update({ status: v })}
-          clearable
-          clearButtonProps={{ 'aria-label': 'Clear status' }}
-          miw={260}
-        />
+        <Group gap={4} align="flex-end">
+          <MultiSelect
+            label="Status"
+            placeholder={statuses.length ? undefined : 'Any status'}
+            data={STATUSES}
+            value={statuses}
+            onChange={(v) => update({ status: v })}
+            clearable
+            clearButtonProps={{ 'aria-label': 'Clear status' }}
+            miw={260}
+          />
+          <Popover width={420} position="bottom-start" withArrow shadow="md">
+            <Popover.Target>
+              <ActionIcon variant="subtle" color="gray" size="lg" aria-label="상태 안내">
+                ⓘ
+              </ActionIcon>
+            </Popover.Target>
+            <Popover.Dropdown>
+              <Text fw={600} mb="xs">
+                상태 안내
+              </Text>
+              <Stack gap="xs">
+                {STATUSES.map(({ value }) => (
+                  <div key={value}>
+                    <StatusBadge status={value} />
+                    <Text size="sm" mt={2}>
+                      {STATUS_META[value].description}
+                    </Text>
+                  </div>
+                ))}
+              </Stack>
+            </Popover.Dropdown>
+          </Popover>
+        </Group>
         <Select
           label="Server"
           placeholder="All servers"
@@ -176,7 +199,12 @@ export function ErrorListPage() {
                         {l.id}
                       </Anchor>
                     </Table.Td>
-                    <Table.Td>{l.serverName}</Table.Td>
+                    <Table.Td>
+                      {l.serverName}{' '}
+                      <Text span size="xs" c="dimmed" title={`${l.instance.host}:${l.instance.sshPort}`}>
+                        {l.instance.host}
+                      </Text>
+                    </Table.Td>
                     <Table.Td title={l.serverTimezone} style={{ whiteSpace: 'nowrap' }}>
                       {formatInTz(l.requestedTime, l.serverTimezone)}
                     </Table.Td>

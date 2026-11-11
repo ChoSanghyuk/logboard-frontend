@@ -91,6 +91,10 @@ area to the real API when the backend milestone lands. Regenerate types from `/v
       lazy-loaded routes, `/errors` "Reset filters"
 - Verify: e2e green in compose.
 
+### Status labels (Korean) (spec/status-ko-labels/task.md)
+- [x] Korean status labels + description tooltip on `StatusBadge` (`STATUS_META` is the single source); `/errors`
+      filter options in Korean + "상태 안내" popover; API codes / URL params stay English
+
 ### Post-MVP backlog
 - [ ] Search page: on a "Host key … changed" FETCH_FAILED, show the same warning + "Reset host key" action as the Servers page
 

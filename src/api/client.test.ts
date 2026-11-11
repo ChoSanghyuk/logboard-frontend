@@ -5,8 +5,9 @@ import { api, ApiRequestError, unwrap } from './client';
 
 test('typed client reads servers from the mock API', async () => {
   const servers = await unwrap(api.GET('/api/servers'));
-  expect(servers.map((s) => s.name)).toEqual(['order-api', 'billing-batch', 'eu-gateway']);
-  expect(servers[0]).not.toHaveProperty('password');
+  expect(servers.map((s) => s.name)).toEqual(['order-api', 'billing-batch', 'eu-gateway', 'cart-api']);
+  expect(servers[0].instances[0]).not.toHaveProperty('password');
+  expect(servers[0].instances[0]).not.toHaveProperty('privateKey');
 });
 
 test('unwrap throws ApiRequestError carrying the ApiError body', async () => {

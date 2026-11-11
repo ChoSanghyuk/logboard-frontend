@@ -8,6 +8,7 @@ const REQUIRED_PLACEHOLDER = '{{errorLog}}';
 const PLACEHOLDERS = [
   { token: REQUIRED_PLACEHOLDER, help: 'The cropped log lines (required)' },
   { token: '{{serverName}}', help: 'Server name' },
+  { token: '{{host}}', help: 'Host of the instance the error came from' },
   { token: '{{errorTime}}', help: 'Requested error time' },
   { token: '{{exceptionClass}}', help: 'Exception class of the selected entry' },
 ];
